@@ -1,0 +1,99 @@
+stages:
+  - test
+  - build
+  - push
+  - deploy
+
+variables:
+  CLOUD_RUN_REGION: us-east1
+  CLOUD_RUN_SERVICE_NAME: dev-story-catalog
+  DOCKER_TLS_CERTDIR: "/certs"
+  GITLAB_IMAGE: registry.gitlab.com/drtechniko/story-catalog
+  GCP_PROJECT_ID: sesolt-mind-reading-virus
+  IMAGE_NAME: story-catalog
+
+test:
+  services:
+    - postgres:14-alpine
+  variables:
+    POSTGRES_DB: test
+    POSTGRES_USER: postgres
+    POSTGRES_PASSWORD: postgres
+    POSTGRES_HOST: postgres
+    NODE_ENV: test
+    CI: 'true'
+    ADMIN_EMAIL: admin@admin.admin
+    ADMIN_PASSWORD: password
+    TEST_STUDENT_EMAIL: foo@bar.baz
+    TEST_STUDENT_PASSWORD: foo
+    SALT_ROUNDS: 10
+    JWT_ACCESS_TOKEN_SECRET: asscess-secret
+    JWT_ACCESS_TOKEN_EXPIRATION_TIME: 7200
+    JWT_REFRESH_TOKEN_SECRET: refresh-secret
+    JWT_REFRESH_TOKEN_EXPIRATION_TIME: 15552000
+  image: node:16.14.0
+  stage: test
+  before_script:
+    - yarn install
+  script:
+    - yarn lint
+    - yarn test
+
+build:
+  image: docker:20.10.12
+  services:
+    - docker:20.10.12-dind
+  stage: build
+  before_script:
+    - echo $CI_JOB_TOKEN | docker login -u gitlab-ci-token registry.gitlab.com
+      --password-stdin
+  script:
+    - docker pull $GITLAB_IMAGE || true
+    - docker build
+      --build-arg DEBUG_MODE=$DEBUG_MODE
+      --build-arg STORY_CATALOG_URL=$STORY_CATALOG_URL
+      --build-arg USE_MOCKED_CATALOG=$USE_MOCKED_CATALOG
+      --cache-from $GITLAB_IMAGE
+      -t $GITLAB_IMAGE:$CI_COMMIT_SHA
+      .
+    - docker push $GITLAB_IMAGE:$CI_COMMIT_SHA
+
+push:
+  image: docker:20.10.12
+  services:
+    - docker:20.10.12-dind
+  stage: push
+  before_script:
+    - apk add --update jq
+    - echo $GCLOUD_SERVICE_KEY > ${HOME}/gcloud-service-key.json
+    - docker login -u gitlab-ci-token -p $CI_JOB_TOKEN registry.gitlab.com
+    - export VERSION=$(jq -r .version package.json)
+  script:
+    - docker pull $GITLAB_IMAGE:$CI_COMMIT_SHA
+    - docker login -u _json_key --password-stdin https://us.gcr.io <
+      ${HOME}/gcloud-service-key.json
+    - docker tag $GITLAB_IMAGE:$CI_COMMIT_SHA
+      us.gcr.io/$GCP_PROJECT_ID/$IMAGE_NAME:latest
+    - docker tag $GITLAB_IMAGE:$CI_COMMIT_SHA
+      us.gcr.io/$GCP_PROJECT_ID/$IMAGE_NAME:$VERSION
+    - docker push us.gcr.io/$GCP_PROJECT_ID/$IMAGE_NAME:latest
+    - docker push us.gcr.io/$GCP_PROJECT_ID/$IMAGE_NAME:$VERSION
+  only:
+    - main
+
+deploy:
+  image: google/cloud-sdk
+  stage: deploy
+  before_script:
+    - apt-get -qqy update && apt-get install -qqy jq
+    - echo $GCLOUD_SERVICE_KEY > ${HOME}/gcloud-service-key.json
+    - gcloud auth activate-service-account --key-file
+      ${HOME}/gcloud-service-key.json
+    - gcloud config set project ${GCP_PROJECT_ID}
+    - export VERSION=$(jq -r .version package.json)
+  script:
+    - gcloud run deploy ${CLOUD_RUN_SERVICE_NAME} --image
+      us.gcr.io/$GCP_PROJECT_ID/$IMAGE_NAME:$VERSION --region
+      ${CLOUD_RUN_REGION}
+  only:
+    - main
